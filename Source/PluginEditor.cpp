@@ -42,26 +42,22 @@ void CoopianoLookAndFeel::drawRotarySlider(juce::Graphics& g,
     const float cy = static_cast<float>(y) + static_cast<float>(height) * 0.46f;
     const float angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
 
-    // Track arc
     juce::Path bgArc;
     bgArc.addCentredArc(cx, cy, radius, radius, 0.0f, rotaryStartAngle, rotaryEndAngle, true);
     g.setColour(kBorderHair);
     g.strokePath(bgArc, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-    // Active brass arc
     juce::Path valArc;
     valArc.addCentredArc(cx, cy, radius, radius, 0.0f, rotaryStartAngle, angle, true);
     g.setColour(kAccentBrass);
     g.strokePath(valArc, juce::PathStrokeType(3.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-    // Machined cap
     const float capR = radius * 0.72f;
     g.setColour(kBgSurface);
     g.fillEllipse(cx - capR, cy - capR, capR * 2.0f, capR * 2.0f);
     g.setColour(kBorderHair.brighter(0.25f));
     g.drawEllipse(cx - capR, cy - capR, capR * 2.0f, capR * 2.0f, 1.0f);
 
-    // Indicator needle
     juce::Path pointer;
     const float pLen = capR * 0.78f;
     const float pThick = 2.2f;
@@ -98,7 +94,6 @@ CoopianoAudioProcessorEditor::CoopianoAudioProcessorEditor(CoopianoAudioProcesso
 {
     setLookAndFeel(&lookAndFeel_);
 
-    // Preset selector
     for (int i = 0; i < processor_.getNumPrograms(); ++i)
         presetCombo_.addItem(processor_.getProgramName(i), i + 1);
     presetCombo_.setSelectedId(processor_.getCurrentProgram() + 1, juce::dontSendNotification);
@@ -114,11 +109,24 @@ CoopianoAudioProcessorEditor::CoopianoAudioProcessorEditor(CoopianoAudioProcesso
     addAndMakeVisible(loadIniButton_);
     addAndMakeVisible(saveIniButton_);
 
+    softPedalButton_.setClickingTogglesState(true);
+    softPedalButton_.setTooltip("Soft Pedal / Una Corda (MIDI CC 67)");
+    softPedalButton_.onClick = [this] {
+        processor_.setUiSoftPedal(softPedalButton_.getToggleState());
+    };
+    addAndMakeVisible(softPedalButton_);
+
+    sostenutoButton_.setClickingTogglesState(true);
+    sostenutoButton_.setTooltip("Sostenuto Pedal (MIDI CC 66)");
+    sostenutoButton_.onClick = [this] {
+        processor_.setUiSostenuto(sostenutoButton_.getToggleState());
+    };
+    addAndMakeVisible(sostenutoButton_);
+
     sustainButton_.setClickingTogglesState(true);
+    sustainButton_.setTooltip("Sustain / Damper Pedal (MIDI CC 64)");
     sustainButton_.onClick = [this] {
-        sustainLatched_ = sustainButton_.getToggleState();
-        processor_.keyboardState().processNextMidiEvent(
-            juce::MidiMessage::controllerEvent(1, 64, sustainLatched_ ? 127 : 0));
+        processor_.setUiSustain(sustainButton_.getToggleState());
     };
     addAndMakeVisible(sustainButton_);
 
@@ -206,9 +214,9 @@ CoopianoAudioProcessorEditor::CoopianoAudioProcessorEditor(CoopianoAudioProcesso
     addAndMakeVisible(keyboard_);
 
     selectTab(0);
-    setSize(980, 560);
+    setSize(1020, 560);
     setResizable(true, true);
-    setResizeLimits(840, 500, 1440, 820);
+    setResizeLimits(880, 500, 1440, 820);
     startTimerHz(24);
 }
 
@@ -287,6 +295,14 @@ void CoopianoAudioProcessorEditor::timerCallback()
 {
     meterL_ = std::max(processor_.outputPeakL(), meterL_ * 0.84f);
     meterR_ = std::max(processor_.outputPeakR(), meterR_ * 0.84f);
+
+    if (softPedalButton_.getToggleState() != processor_.isSoftPedalDown())
+        softPedalButton_.setToggleState(processor_.isSoftPedalDown(), juce::dontSendNotification);
+    if (sostenutoButton_.getToggleState() != processor_.isSostenutoDown())
+        sostenutoButton_.setToggleState(processor_.isSostenutoDown(), juce::dontSendNotification);
+    if (sustainButton_.getToggleState() != processor_.isSustainDown())
+        sustainButton_.setToggleState(processor_.isSustainDown(), juce::dontSendNotification);
+
     repaint(0, 0, getWidth(), 64);
 }
 
@@ -294,7 +310,6 @@ void CoopianoAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(kBgCanvas);
 
-    // Header bar
     auto header = getLocalBounds().removeFromTop(58);
     g.setColour(kBgPanel);
     g.fillRect(header);
@@ -313,10 +328,9 @@ void CoopianoAudioProcessorEditor::paint(juce::Graphics& g)
     const juce::String telemetry = statusText
         + "  |  Voices: " + juce::String(processor_.activeVoices())
         + "  |  PDC: " + juce::String(processor_.latencySamplesReported()) + " smp";
-    g.drawText(telemetry, 20, 33, 340, 18, juce::Justification::centredLeft);
+    g.drawText(telemetry, 20, 33, 300, 18, juce::Justification::centredLeft);
 
-    // Output peak bars
-    const int meterX = getWidth() - 120;
+    const int meterX = getWidth() - 116;
     g.setColour(kBgSurface);
     g.fillRoundedRectangle(static_cast<float>(meterX), 18.0f, 96.0f, 8.0f, 2.0f);
     g.fillRoundedRectangle(static_cast<float>(meterX), 31.0f, 96.0f, 8.0f, 2.0f);
@@ -326,7 +340,6 @@ void CoopianoAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillRoundedRectangle(static_cast<float>(meterX), 31.0f,
                            96.0f * juce::jlimit(0.0f, 1.0f, meterR_), 8.0f, 2.0f);
 
-    // Main parameter rack surface
     auto rackArea = getLocalBounds().reduced(16);
     rackArea.removeFromTop(58);
     rackArea.removeFromBottom(108);
@@ -341,22 +354,21 @@ void CoopianoAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
 
-    // Header controls
     auto header = bounds.removeFromTop(58);
-    auto rightControls = header.removeFromRight(580).reduced(12, 14);
-    rightControls.removeFromRight(118); // reserve stereo meter space
-    sustainButton_.setBounds(rightControls.removeFromRight(76).reduced(2, 0));
-    saveIniButton_.setBounds(rightControls.removeFromRight(88).reduced(2, 0));
-    loadIniButton_.setBounds(rightControls.removeFromRight(88).reduced(2, 0));
+    auto rightControls = header.removeFromRight(680).reduced(12, 14);
+    rightControls.removeFromRight(114);
+    sustainButton_.setBounds(rightControls.removeFromRight(64).reduced(2, 0));
+    sostenutoButton_.setBounds(rightControls.removeFromRight(54).reduced(2, 0));
+    softPedalButton_.setBounds(rightControls.removeFromRight(52).reduced(2, 0));
+    saveIniButton_.setBounds(rightControls.removeFromRight(84).reduced(2, 0));
+    loadIniButton_.setBounds(rightControls.removeFromRight(84).reduced(2, 0));
     presetCombo_.setBounds(rightControls.reduced(4, 0));
 
-    // Bottom keyboard
     auto kbArea = bounds.removeFromBottom(104).reduced(16, 8);
     keyboard_.setBounds(kbArea);
 
     auto work = bounds.reduced(16, 10);
 
-    // Section tabs
     auto tabRow = work.removeFromTop(34);
     const int tabW = tabRow.getWidth() / static_cast<int>(tabButtons_.size());
     for (size_t i = 0; i < tabButtons_.size(); ++i)

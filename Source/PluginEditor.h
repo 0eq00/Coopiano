@@ -67,8 +67,9 @@ private:
     juce::ComboBox presetCombo_;
     juce::TextButton loadIniButton_{"Import .ini"};
     juce::TextButton saveIniButton_{"Export .ini"};
+    juce::TextButton softPedalButton_{"Soft"};
+    juce::TextButton sostenutoButton_{"Sost"};
     juce::TextButton sustainButton_{"Sustain"};
-    bool sustainLatched_ = false;
 
     std::array<juce::TextButton, 6> tabButtons_;
     int activeTab_ = 0;

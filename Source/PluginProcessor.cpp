@@ -31,6 +31,22 @@ bool CoopianoAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) 
     return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
 }
 
+void CoopianoAudioProcessor::resetPedalState() noexcept
+{
+    for (auto& ch : heldKeys_) ch.fill(false);
+    for (auto& ch : sostenutoLatched_) ch.fill(false);
+    for (auto& ch : pendingRelease_) ch.fill(false);
+    sostenutoDown_.fill(false);
+    softPedalPos_.fill(0.0);
+    lastUiSustain_ = false;
+    lastUiSostenuto_ = false;
+    midiSustainIndicator_.store(false, std::memory_order_relaxed);
+    midiSostenutoIndicator_.store(false, std::memory_order_relaxed);
+    midiSoftIndicator_.store(false, std::memory_order_relaxed);
+    softLpStateL_ = 0.0f;
+    softLpStateR_ = 0.0f;
+}
+
 void CoopianoAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     currentSampleRate_ = std::max(8000.0, sampleRate);
@@ -44,9 +60,14 @@ void CoopianoAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBloc
     const auto cfg = coopiano::params::readConfig(apvts_);
     outputGain_.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(static_cast<float>(cfg.outputGainDb)));
 
+    softAmountSmoothed_.reset(currentSampleRate_, 0.025);
+    softAmountSmoothed_.setCurrentAndTargetValue(0.0f);
+    softLpCoeff_ = std::exp(-2.0f * juce::MathConstants<float>::pi * 2400.0f / static_cast<float>(currentSampleRate_));
+
     if (activeRuntime_)
         activeRuntime_->reset();
 
+    resetPedalState();
     rebuildReverb();
     builder_.requestBuild(cfg, currentSampleRate_, currentBlockSize_, true);
 }
@@ -58,6 +79,7 @@ void CoopianoAudioProcessor::releaseResources()
     if (activeReverb_)
         activeReverb_->reset();
     keyboardState_.reset();
+    resetPedalState();
 }
 
 void CoopianoAudioProcessor::parameterChanged(const juce::String& parameterID, float newValue)
@@ -100,7 +122,6 @@ void CoopianoAudioProcessor::rebuildReverb()
     auto* raw = fresh.get();
     if (auto* displaced = pendingReverb_.exchange(raw, std::memory_order_acq_rel))
     {
-        // Keep displaced until retired cleanup
         juce::ignoreUnused(displaced);
     }
     retiredReverbs_.push_back(std::move(fresh));
@@ -108,8 +129,115 @@ void CoopianoAudioProcessor::rebuildReverb()
     const uint64_t epochNow = audioReverbEpoch_.load(std::memory_order_acquire);
     if (retiredReverbs_.size() > 2 && epochNow > lastReverbRetiredEpoch_ + 2)
     {
-        // Keep the latest two instances (pending + currently active)
         retiredReverbs_.erase(retiredReverbs_.begin(), retiredReverbs_.end() - 2);
+    }
+}
+
+void CoopianoAudioProcessor::handleNoteOnEvent(size_t offset, int ch, int key, int vel) noexcept
+{
+    if (midiEvents_.size() >= coopiano::EngineRuntime::kMaxEventsPerBlock)
+        return;
+    if (key < 0 || key > 127 || ch < 0 || ch > 15)
+        return;
+
+    heldKeys_[static_cast<size_t>(ch)][static_cast<size_t>(key)] = true;
+    pendingRelease_[static_cast<size_t>(ch)][static_cast<size_t>(key)] = false;
+
+    instrument::MidiEvent ev;
+    ev.offset = offset;
+    ev.type = instrument::MidiEvent::Type::note_on;
+    ev.key = key;
+    ev.velocity = std::clamp(vel, 0, 127);
+    ev.channel = ch;
+    ev.seed = noteSeedCounter_++;
+    midiEvents_.push_back(ev);
+}
+
+void CoopianoAudioProcessor::handleNoteOffEvent(size_t offset, int ch, int key) noexcept
+{
+    if (key < 0 || key > 127 || ch < 0 || ch > 15)
+        return;
+
+    const size_t c = static_cast<size_t>(ch);
+    const size_t k = static_cast<size_t>(key);
+    heldKeys_[c][k] = false;
+
+    // If Sostenuto captured this key when pressed, hold its damper open until Sostenuto releases.
+    if (sostenutoDown_[c] && sostenutoLatched_[c][k])
+    {
+        pendingRelease_[c][k] = true;
+        return;
+    }
+
+    if (midiEvents_.size() >= coopiano::EngineRuntime::kMaxEventsPerBlock)
+        return;
+
+    instrument::MidiEvent ev;
+    ev.offset = offset;
+    ev.type = instrument::MidiEvent::Type::note_off;
+    ev.key = key;
+    ev.channel = ch;
+    midiEvents_.push_back(ev);
+}
+
+void CoopianoAudioProcessor::handleSostenutoEvent(size_t offset, int ch, bool down) noexcept
+{
+    if (ch < 0 || ch > 15)
+        return;
+
+    const size_t c = static_cast<size_t>(ch);
+    const bool wasDown = sostenutoDown_[c];
+    sostenutoDown_[c] = down;
+
+    if (!wasDown && down)
+    {
+        // Latch only keys that are physically held at the exact instant Sostenuto engages.
+        for (size_t k = 0; k < 128; ++k)
+        {
+            sostenutoLatched_[c][k] = heldKeys_[c][k];
+            pendingRelease_[c][k] = false;
+        }
+    }
+    else if (wasDown && !down)
+    {
+        // Release any latched keys whose physical note_off already occurred.
+        for (size_t k = 0; k < 128; ++k)
+        {
+            const bool shouldRelease = sostenutoLatched_[c][k] && pendingRelease_[c][k];
+            sostenutoLatched_[c][k] = false;
+            pendingRelease_[c][k] = false;
+
+            if (shouldRelease && midiEvents_.size() < coopiano::EngineRuntime::kMaxEventsPerBlock)
+            {
+                instrument::MidiEvent ev;
+                ev.offset = offset;
+                ev.type = instrument::MidiEvent::Type::note_off;
+                ev.key = static_cast<int>(k);
+                ev.channel = ch;
+                midiEvents_.push_back(ev);
+            }
+        }
+    }
+}
+
+void CoopianoAudioProcessor::handleAllNotesOffEvent(size_t offset, int ch) noexcept
+{
+    if (ch < 0 || ch > 15)
+        return;
+
+    const size_t c = static_cast<size_t>(ch);
+    heldKeys_[c].fill(false);
+    sostenutoLatched_[c].fill(false);
+    pendingRelease_[c].fill(false);
+
+    for (int k = 21; k <= 108 && midiEvents_.size() < coopiano::EngineRuntime::kMaxEventsPerBlock; ++k)
+    {
+        instrument::MidiEvent ev;
+        ev.offset = offset;
+        ev.type = instrument::MidiEvent::Type::note_off;
+        ev.key = k;
+        ev.channel = ch;
+        midiEvents_.push_back(ev);
     }
 }
 
@@ -125,7 +253,7 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         return;
     }
 
-    // Mix on-screen / computer keyboard MIDI into the host MIDI buffer
+    // Mix on-screen / computer keyboard MIDI notes into the host MIDI buffer
     keyboardState_.processNextMidiBuffer(midiMessages, 0, numSamples, true);
 
     // Wait-free swap to newly constructed EngineRuntime when ready
@@ -133,6 +261,7 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     if (nextRuntime != activeRuntime_)
     {
         activeRuntime_ = nextRuntime;
+        resetPedalState();
         if (activeRuntime_)
         {
             const int reported = static_cast<int>(activeRuntime_->latencySamples());
@@ -159,61 +288,83 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         return;
     }
 
-    // Convert JUCE MidiBuffer to pre-allocated instrument::MidiEvent sequence
     midiEvents_.clear();
+
+    // Inject UI pedal transitions cleanly at sample offset 0 (preserves monotonic offset order)
+    const bool uiSus = uiSustain_.load(std::memory_order_acquire);
+    if (uiSus != lastUiSustain_)
+    {
+        lastUiSustain_ = uiSus;
+        instrument::MidiEvent ev;
+        ev.offset = 0;
+        ev.type = instrument::MidiEvent::Type::pedal;
+        ev.channel = 0;
+        ev.position = uiSus ? 1.0 : 0.0;
+        ev.down = uiSus;
+        midiEvents_.push_back(ev);
+    }
+
+    const bool uiSost = uiSostenuto_.load(std::memory_order_acquire);
+    if (uiSost != lastUiSostenuto_)
+    {
+        lastUiSostenuto_ = uiSost;
+        handleSostenutoEvent(0, 0, uiSost);
+    }
+
+    const bool uiSoftActive = uiSoft_.load(std::memory_order_acquire);
+
+    // Convert JUCE MidiBuffer to pre-allocated instrument::MidiEvent sequence
     for (const auto metadata : midiMessages)
     {
         if (midiEvents_.size() >= coopiano::EngineRuntime::kMaxEventsPerBlock)
             break;
 
         const auto& msg = metadata.getMessage();
-        const int offset = std::clamp(metadata.samplePosition, 0, numSamples);
+        const size_t offset = static_cast<size_t>(std::clamp(metadata.samplePosition, 0, numSamples));
         const int ch = std::clamp(msg.getChannel() - 1, 0, 15);
 
         if (msg.isNoteOn())
         {
-            instrument::MidiEvent ev;
-            ev.offset = static_cast<size_t>(offset);
-            ev.type = instrument::MidiEvent::Type::note_on;
-            ev.key = msg.getNoteNumber();
-            ev.velocity = std::clamp(static_cast<int>(msg.getVelocity()), 0, 127);
-            ev.channel = ch;
-            ev.seed = noteSeedCounter_++;
-            midiEvents_.push_back(ev);
+            const double soft = std::max(softPedalPos_[static_cast<size_t>(ch)], uiSoftActive ? 1.0 : 0.0);
+            const int scaledVel = std::clamp(
+                static_cast<int>(std::lround(static_cast<double>(msg.getVelocity()) * (1.0 - 0.34 * soft))),
+                1,
+                127);
+            handleNoteOnEvent(offset, ch, msg.getNoteNumber(), scaledVel);
         }
         else if (msg.isNoteOff())
         {
-            instrument::MidiEvent ev;
-            ev.offset = static_cast<size_t>(offset);
-            ev.type = instrument::MidiEvent::Type::note_off;
-            ev.key = msg.getNoteNumber();
-            ev.channel = ch;
-            midiEvents_.push_back(ev);
+            handleNoteOffEvent(offset, ch, msg.getNoteNumber());
         }
         else if (msg.isController())
         {
             const int cc = msg.getControllerNumber();
-            if (cc == 64) // Sustain / Damper (supports continuous half-pedaling)
+            if (cc == 64) // Sustain / Damper (continuous half-pedal)
             {
+                const double pos = std::clamp(msg.getControllerValue() / 127.0, 0.0, 1.0);
+                midiSustainIndicator_.store(msg.getControllerValue() >= 64, std::memory_order_relaxed);
                 instrument::MidiEvent ev;
-                ev.offset = static_cast<size_t>(offset);
+                ev.offset = offset;
                 ev.type = instrument::MidiEvent::Type::pedal;
                 ev.channel = ch;
-                ev.position = std::clamp(msg.getControllerValue() / 127.0, 0.0, 1.0);
-                ev.down = msg.getControllerValue() >= 64;
+                ev.position = (ch == 0 && uiSus) ? 1.0 : pos;
+                ev.down = ev.position >= 0.5;
                 midiEvents_.push_back(ev);
+            }
+            else if (cc == 66) // Sostenuto Pedal
+            {
+                const bool down = msg.getControllerValue() >= 64;
+                midiSostenutoIndicator_.store(down, std::memory_order_relaxed);
+                handleSostenutoEvent(offset, ch, down || (ch == 0 && uiSost));
+            }
+            else if (cc == 67) // Soft Pedal / Una Corda
+            {
+                softPedalPos_[static_cast<size_t>(ch)] = std::clamp(msg.getControllerValue() / 127.0, 0.0, 1.0);
+                midiSoftIndicator_.store(msg.getControllerValue() >= 64, std::memory_order_relaxed);
             }
             else if (cc == 120 || cc == 123) // All Sound Off / All Notes Off
             {
-                for (int k = 21; k <= 108 && midiEvents_.size() < coopiano::EngineRuntime::kMaxEventsPerBlock; ++k)
-                {
-                    instrument::MidiEvent ev;
-                    ev.offset = static_cast<size_t>(offset);
-                    ev.type = instrument::MidiEvent::Type::note_off;
-                    ev.key = k;
-                    ev.channel = ch;
-                    midiEvents_.push_back(ev);
-                }
+                handleAllNotesOffEvent(offset, ch);
             }
         }
     }
@@ -223,6 +374,31 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     {
         buffer.clear();
         return;
+    }
+
+    // Apply Una Corda (soft pedal) warm spectral tilt prior to room reverb
+    double maxSoft = uiSoftActive ? 1.0 : 0.0;
+    for (double p : softPedalPos_)
+        maxSoft = std::max(maxSoft, p);
+    softAmountSmoothed_.setTargetValue(static_cast<float>(maxSoft));
+
+    if (softAmountSmoothed_.isSmoothing() || softAmountSmoothed_.getTargetValue() > 0.0001f)
+    {
+        const float oneMinusC = 1.0f - softLpCoeff_;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float s = softAmountSmoothed_.getNextValue();
+            softLpStateL_ = oneMinusC * left[i] + softLpCoeff_ * softLpStateL_;
+            softLpStateR_ = oneMinusC * right[i] + softLpCoeff_ * softLpStateR_;
+            left[i] = left[i] * (1.0f - s * 0.42f) + softLpStateL_ * (s * 0.28f);
+            right[i] = right[i] * (1.0f - s * 0.42f) + softLpStateR_ * (s * 0.28f);
+        }
+    }
+    else
+    {
+        // Keep lowpass state silently primed with zero overhead during full bypass
+        softLpStateL_ = left[numSamples - 1];
+        softLpStateR_ = right[numSamples - 1];
     }
 
     // Apply independent host-rate StereoReverb (double precision)
