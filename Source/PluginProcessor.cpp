@@ -115,21 +115,30 @@ void CoopianoAudioProcessor::handleAsyncUpdate()
 
 void CoopianoAudioProcessor::rebuildReverb()
 {
+    if (retiredReverbs_.size() > 1 && pendingReverb_.load(std::memory_order_acquire) == nullptr)
+    {
+        const uint64_t epochNow = audioReverbEpoch_.load(std::memory_order_acquire);
+        const uint64_t adoptedEpoch = lastReverbAdoptedEpoch_.load(std::memory_order_acquire);
+        if (epochNow > adoptedEpoch + 1)
+        {
+            retiredReverbs_.erase(retiredReverbs_.begin(), retiredReverbs_.end() - 1);
+        }
+    }
+
     const auto cfg = coopiano::params::readConfig(apvts_);
     const double clampedRate = std::clamp(currentSampleRate_, 8000.0, 192000.0);
 
     auto fresh = std::make_unique<room::StereoReverb>(clampedRate, cfg.preset.reverb);
     auto* raw = fresh.get();
-    if (auto* displaced = pendingReverb_.exchange(raw, std::memory_order_acq_rel))
-    {
-        juce::ignoreUnused(displaced);
-    }
     retiredReverbs_.push_back(std::move(fresh));
 
-    const uint64_t epochNow = audioReverbEpoch_.load(std::memory_order_acquire);
-    if (retiredReverbs_.size() > 2 && epochNow > lastReverbRetiredEpoch_ + 2)
+    if (auto* displaced = pendingReverb_.exchange(raw, std::memory_order_acq_rel))
     {
-        retiredReverbs_.erase(retiredReverbs_.begin(), retiredReverbs_.end() - 2);
+        retiredReverbs_.erase(
+            std::remove_if(retiredReverbs_.begin(), retiredReverbs_.end(), [displaced](const auto& entry) {
+                return entry.get() == displaced;
+            }),
+            retiredReverbs_.end());
     }
 }
 
@@ -271,12 +280,11 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     }
 
     // Wait-free swap to updated Reverb when ready
-    audioReverbEpoch_.fetch_add(1, std::memory_order_acq_rel);
+    const uint64_t currentRevEpoch = audioReverbEpoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
     if (auto* nextRev = pendingReverb_.exchange(nullptr, std::memory_order_acq_rel))
     {
-        activeReverb_.release(); // owned by retiredReverbs_ on message thread
-        activeReverb_.reset(nextRev);
-        lastReverbRetiredEpoch_ = audioReverbEpoch_.load(std::memory_order_relaxed);
+        activeReverb_ = nextRev;
+        lastReverbAdoptedEpoch_.store(currentRevEpoch, std::memory_order_release);
     }
 
     float* left = buffer.getWritePointer(0);
@@ -403,7 +411,7 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     }
 
     // Apply independent host-rate StereoReverb (double precision)
-    if (auto* rev = activeReverb_.get())
+    if (auto* rev = activeReverb_)
     {
         if (rev->options().mix > 0.0 && static_cast<size_t>(numSamples) <= reverbScratchL_.size())
         {

@@ -90,12 +90,12 @@ private:
     std::atomic<bool> engineRebuildPending_{false};
     std::atomic<bool> reverbRebuildPending_{false};
 
-    // Host-rate StereoReverb with wait-free replacement
-    std::unique_ptr<room::StereoReverb> activeReverb_;
+    // Host-rate StereoReverb with wait-free replacement (owned by retiredReverbs_)
+    room::StereoReverb* activeReverb_ = nullptr;
     std::vector<std::unique_ptr<room::StereoReverb>> retiredReverbs_;
     std::atomic<room::StereoReverb*> pendingReverb_{nullptr};
     std::atomic<uint64_t> audioReverbEpoch_{0};
-    uint64_t lastReverbRetiredEpoch_ = 0;
+    std::atomic<uint64_t> lastReverbAdoptedEpoch_{0};
 
     // Pre-allocated audio buffers (resized only in prepareToPlay)
     std::vector<instrument::MidiEvent> midiEvents_;

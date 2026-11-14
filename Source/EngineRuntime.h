@@ -36,7 +36,7 @@ namespace coopiano
             if (cancelFlag && cancelFlag->load(std::memory_order_relaxed))
                 return nullptr;
 
-            rt->engine_->build_strike_cache(config.velocityGamma);
+            rt->engine_->build_strike_cache(config.velocityGamma, cancelFlag);
 
             if (cancelFlag && cancelFlag->load(std::memory_order_relaxed))
                 return nullptr;
@@ -272,7 +272,7 @@ namespace coopiano
             cancelCurrent_.store(true, std::memory_order_release);
             signalThreadShouldExit();
             notify();
-            stopThread(5000);
+            stopThread(-1);
             retired_.clear();
         }
 
@@ -294,11 +294,10 @@ namespace coopiano
         // Audio thread: wait-free check for a newly prepared runtime.
         EngineRuntime* pollForAudioThread(EngineRuntime* currentActive) noexcept
         {
-            audioEpoch_.fetch_add(1, std::memory_order_acq_rel);
+            const uint64_t epoch = audioEpoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
             if (auto* next = pendingForAudio_.exchange(nullptr, std::memory_order_acq_rel))
             {
-                if (currentActive != nullptr)
-                    lastRetiredEpoch_.store(audioEpoch_.load(std::memory_order_relaxed), std::memory_order_release);
+                lastAdoptedEpoch_.store(epoch, std::memory_order_release);
                 return next;
             }
             return currentActive;
@@ -373,19 +372,17 @@ namespace coopiano
                 {
                     lastHandledId = currentId;
                     auto* raw = built.get();
-                    const uint64_t epochSnapshot = audioEpoch_.load(std::memory_order_acquire);
 
                     // Stage into owned pool before publishing pointer to audio thread
-                    retired_.push_back({ std::move(built), epochSnapshot, false });
+                    retired_.push_back({ std::move(built) });
                     if (auto* displaced = pendingForAudio_.exchange(raw, std::memory_order_acq_rel))
                     {
-                        for (auto& entry : retired_)
-                            if (entry.ptr.get() == displaced)
-                                entry.retiredEpoch = epochSnapshot;
+                        retired_.erase(
+                            std::remove_if(retired_.begin(), retired_.end(), [displaced](const OwnedEntry& e) {
+                                return e.ptr.get() == displaced;
+                            }),
+                            retired_.end());
                     }
-                    // Mark previously active entry as retiring once audio epoch advances
-                    for (size_t i = 0; i + 1 < retired_.size(); ++i)
-                        retired_[i].retired = true;
                     hasPublished_.store(true, std::memory_order_release);
                 }
             }
@@ -393,19 +390,22 @@ namespace coopiano
 
         void reclaimSafeRetired()
         {
+            if (retired_.size() <= 1)
+                return;
+            if (pendingForAudio_.load(std::memory_order_acquire) != nullptr)
+                return;
+
             const uint64_t currentEpoch = audioEpoch_.load(std::memory_order_acquire);
-            retired_.erase(
-                std::remove_if(retired_.begin(), retired_.end(), [currentEpoch](const OwnedEntry& e) {
-                    return e.retired && currentEpoch > e.retiredEpoch + 2;
-                }),
-                retired_.end());
+            const uint64_t adoptedEpoch = lastAdoptedEpoch_.load(std::memory_order_acquire);
+            if (currentEpoch > adoptedEpoch + 1)
+            {
+                retired_.erase(retired_.begin(), retired_.end() - 1);
+            }
         }
 
         struct OwnedEntry
         {
             std::unique_ptr<EngineRuntime> ptr;
-            uint64_t retiredEpoch = 0;
-            bool retired = false;
         };
 
         juce::CriticalSection lock_;
@@ -422,7 +422,7 @@ namespace coopiano
 
         std::atomic<EngineRuntime*> pendingForAudio_{nullptr};
         std::atomic<uint64_t> audioEpoch_{0};
-        std::atomic<uint64_t> lastRetiredEpoch_{0};
+        std::atomic<uint64_t> lastAdoptedEpoch_{0};
 
         std::vector<OwnedEntry> retired_;
     };

@@ -3,6 +3,7 @@
 #ifndef SYNTHPIANO_INSTRUMENT_HPP
 #define SYNTHPIANO_INSTRUMENT_HPP
 #include "piano.hpp"
+#include <atomic>
 #include "reverb.hpp"
 #include "streaming_soundboard.hpp"
 
@@ -91,14 +92,18 @@ class StrikeBank {
     std::vector<piano::ContactResponse> responses_;
     std::vector<std::unique_ptr<piano::StrikeWorkspace>> workspaces_;
 public:
-    StrikeBank(const std::vector<piano::Key>& keys, const piano::Options& options, double gamma) {
+    StrikeBank(const std::vector<piano::Key>& keys, const piano::Options& options, double gamma,
+               const std::atomic<bool>* cancel = nullptr) {
         if (keys.size() != 88 || !std::isfinite(gamma) || gamma <= 0)
             throw std::invalid_argument("instrument: invalid strike bank setup");
         responses_.reserve(88*127); workspaces_.reserve(88);
         for (const auto& key : keys) {
+            if (cancel && cancel->load(std::memory_order_relaxed)) return;
             workspaces_.push_back(std::make_unique<piano::StrikeWorkspace>(key, options));
-            for (int velocity = 1; velocity <= 127; ++velocity)
+            for (int velocity = 1; velocity <= 127; ++velocity) {
+                if (cancel && cancel->load(std::memory_order_relaxed)) return;
                 responses_.emplace_back(key, std::clamp(std::pow(velocity/127.0, gamma), .02, 1.0));
+            }
         }
     }
     const piano::PreparedNote* prepare(int physical_key, int velocity, uint64_t seed) noexcept {
@@ -248,8 +253,9 @@ public:
     // Setup/stopped engine only. A replacement is built in full before it is
     // installed; failure preserves the current bank. Voicing/options are fixed
     // for the Engine lifetime. To change them, construct a new Engine off audio.
-    void build_strike_cache(double velocity_gamma = 1) {
-        auto replacement = std::make_unique<StrikeBank>(keys_, settings_.voice_options, velocity_gamma);
+    void build_strike_cache(double velocity_gamma = 1, const std::atomic<bool>* cancel = nullptr) {
+        auto replacement = std::make_unique<StrikeBank>(keys_, settings_.voice_options, velocity_gamma, cancel);
+        if (cancel && cancel->load(std::memory_order_relaxed)) return;
         strike_bank_.swap(replacement);
     }
     bool has_strike_cache() const noexcept { return bool(strike_bank_); }
