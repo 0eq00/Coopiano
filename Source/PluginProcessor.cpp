@@ -62,7 +62,7 @@ void CoopianoAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBloc
 
     softAmountSmoothed_.reset(currentSampleRate_, 0.025);
     softAmountSmoothed_.setCurrentAndTargetValue(0.0f);
-    softLpCoeff_ = std::exp(-2.0f * juce::MathConstants<float>::pi * 2400.0f / static_cast<float>(currentSampleRate_));
+    softLpCoeff_ = std::exp(-2.0f * juce::MathConstants<float>::pi * 2200.0f / static_cast<float>(currentSampleRate_));
 
     if (activeRuntime_)
         activeRuntime_->reset();
@@ -327,7 +327,7 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         {
             const double soft = std::max(softPedalPos_[static_cast<size_t>(ch)], uiSoftActive ? 1.0 : 0.0);
             const int scaledVel = std::clamp(
-                static_cast<int>(std::lround(static_cast<double>(msg.getVelocity()) * (1.0 - 0.34 * soft))),
+                static_cast<int>(std::lround(static_cast<double>(msg.getVelocity()) * (1.0 - 0.14 * soft))),
                 1,
                 127);
             handleNoteOnEvent(offset, ch, msg.getNoteNumber(), scaledVel);
@@ -388,10 +388,11 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         for (int i = 0; i < numSamples; ++i)
         {
             const float s = softAmountSmoothed_.getNextValue();
+            const float k = s * 0.34f;
             softLpStateL_ = oneMinusC * left[i] + softLpCoeff_ * softLpStateL_;
             softLpStateR_ = oneMinusC * right[i] + softLpCoeff_ * softLpStateR_;
-            left[i] = left[i] * (1.0f - s * 0.42f) + softLpStateL_ * (s * 0.28f);
-            right[i] = right[i] * (1.0f - s * 0.42f) + softLpStateR_ * (s * 0.28f);
+            left[i] = left[i] * (1.0f - k) + softLpStateL_ * k;
+            right[i] = right[i] * (1.0f - k) + softLpStateR_ * k;
         }
     }
     else
