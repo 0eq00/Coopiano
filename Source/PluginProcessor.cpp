@@ -335,7 +335,7 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         {
             const double soft = std::max(softPedalPos_[static_cast<size_t>(ch)], uiSoftActive ? 1.0 : 0.0);
             const int scaledVel = std::clamp(
-                static_cast<int>(std::lround(static_cast<double>(msg.getVelocity()) * (1.0 - 0.14 * soft))),
+                static_cast<int>(std::lround(static_cast<double>(msg.getVelocity()) * (1.0 - 0.24 * soft))),
                 1,
                 127);
             handleNoteOnEvent(offset, ch, msg.getNoteNumber(), scaledVel);
