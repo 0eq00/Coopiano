@@ -89,28 +89,58 @@ public:
 // The velocity curve is baked into the bank: exact mapped values, no rounding
 // to a different velocity or interpolation. Workspaces belong to the audio owner.
 class StrikeBank {
+    int minKey_ = 21;
+    int maxKey_ = 108;
+    std::vector<int> velocitySteps_;
     std::vector<piano::ContactResponse> responses_;
     std::vector<std::unique_ptr<piano::StrikeWorkspace>> workspaces_;
+    size_t nearest_velocity_index(int velocity) const noexcept {
+        if (velocitySteps_.size() == 127)
+            return static_cast<size_t>(velocity - 1);
+        size_t best = 0;
+        int bestDiff = std::abs(velocity - velocitySteps_[0]);
+        for (size_t i = 1; i < velocitySteps_.size(); ++i) {
+            const int diff = std::abs(velocity - velocitySteps_[i]);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                best = i;
+            }
+        }
+        return best;
+    }
 public:
     StrikeBank(const std::vector<piano::Key>& keys, const piano::Options& options, double gamma,
-               const std::atomic<bool>* cancel = nullptr) {
+               const std::atomic<bool>* cancel = nullptr, bool editMode = false)
+        : minKey_(editMode ? 36 : 21)
+        , maxKey_(editMode ? 72 : 108) {
         if (keys.size() != 88 || !std::isfinite(gamma) || gamma <= 0)
             throw std::invalid_argument("instrument: invalid strike bank setup");
-        responses_.reserve(88*127); workspaces_.reserve(88);
-        for (const auto& key : keys) {
+        if (editMode) {
+            velocitySteps_ = { 16, 32, 48, 64, 80, 96, 112, 127 };
+        } else {
+            velocitySteps_.resize(127);
+            for (int v = 1; v <= 127; ++v)
+                velocitySteps_[static_cast<size_t>(v - 1)] = v;
+        }
+        const size_t numKeys = static_cast<size_t>(maxKey_ - minKey_ + 1);
+        responses_.reserve(numKeys * velocitySteps_.size());
+        workspaces_.reserve(numKeys);
+        for (int midi = minKey_; midi <= maxKey_; ++midi) {
             if (cancel && cancel->load(std::memory_order_relaxed)) return;
+            const auto& key = keys[static_cast<size_t>(midi - 21)];
             workspaces_.push_back(std::make_unique<piano::StrikeWorkspace>(key, options));
-            for (int velocity = 1; velocity <= 127; ++velocity) {
+            for (int velocity : velocitySteps_) {
                 if (cancel && cancel->load(std::memory_order_relaxed)) return;
                 responses_.emplace_back(key, std::clamp(std::pow(velocity/127.0, gamma), .02, 1.0));
             }
         }
     }
     const piano::PreparedNote* prepare(int physical_key, int velocity, uint64_t seed) noexcept {
-        if (physical_key < 21 || physical_key > 108 || velocity < 1 || velocity > 127) return nullptr;
-        size_t key = (size_t)(physical_key-21);
+        if (physical_key < minKey_ || physical_key > maxKey_ || velocity < 1 || velocity > 127) return nullptr;
+        size_t key = static_cast<size_t>(physical_key - minKey_);
+        size_t velIdx = nearest_velocity_index(velocity);
         auto& workspace = *workspaces_[key];
-        if (!workspace.prepare(responses_[key*127+(size_t)velocity-1], seed)) return nullptr;
+        if (!workspace.prepare(responses_[key * velocitySteps_.size() + velIdx], seed)) return nullptr;
         return &workspace.note();
     }
     size_t response_storage_bytes() const noexcept {
@@ -253,8 +283,8 @@ public:
     // Setup/stopped engine only. A replacement is built in full before it is
     // installed; failure preserves the current bank. Voicing/options are fixed
     // for the Engine lifetime. To change them, construct a new Engine off audio.
-    void build_strike_cache(double velocity_gamma = 1, const std::atomic<bool>* cancel = nullptr) {
-        auto replacement = std::make_unique<StrikeBank>(keys_, settings_.voice_options, velocity_gamma, cancel);
+    void build_strike_cache(double velocity_gamma = 1, const std::atomic<bool>* cancel = nullptr, bool editMode = false) {
+        auto replacement = std::make_unique<StrikeBank>(keys_, settings_.voice_options, velocity_gamma, cancel, editMode);
         if (cancel && cancel->load(std::memory_order_relaxed)) return;
         strike_bank_.swap(replacement);
     }

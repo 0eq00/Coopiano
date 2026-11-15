@@ -55,6 +55,10 @@ public:
     bool isSostenutoDown() const noexcept { return uiSostenuto_.load(std::memory_order_acquire) || midiSostenutoIndicator_.load(std::memory_order_relaxed); }
     bool isSoftPedalDown() const noexcept { return uiSoft_.load(std::memory_order_acquire) || midiSoftIndicator_.load(std::memory_order_relaxed); }
 
+    // Play Mode (full 88x127) vs Edit Mode (fast C2-C5 / 8-velocity preview)
+    void setEditMode(bool editMode);
+    bool isEditMode() const noexcept { return editMode_.load(std::memory_order_acquire); }
+
     // Safe telemetry for UI
     bool isEngineBuilding() const noexcept { return builder_.isBuilding(); }
     bool isEngineReady() const noexcept { return builder_.isReady(); }
@@ -87,7 +91,9 @@ private:
     int currentBlockSize_ = 512;
     int currentProgram_ = 0;
 
+    std::atomic<bool> editMode_{false};
     std::atomic<bool> engineRebuildPending_{false};
+    std::atomic<bool> immediateRebuildRequested_{false};
     std::atomic<bool> reverbRebuildPending_{false};
 
     // Host-rate StereoReverb with wait-free replacement (owned by retiredReverbs_)

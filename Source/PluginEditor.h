@@ -56,6 +56,7 @@ private:
 
     void timerCallback() override;
     void selectTab(int tabIndex);
+    void updateModeUi();
     void populateSection(int tabIndex, const std::vector<std::pair<const char*, const char*>>& params,
                          const std::vector<std::pair<const char*, const char*>>& toggles = {});
     void importIniFile();
@@ -64,6 +65,7 @@ private:
     CoopianoAudioProcessor& processor_;
     CoopianoLookAndFeel lookAndFeel_;
 
+    juce::TextButton modeButton_{"Play Mode"};
     juce::ComboBox presetCombo_;
     juce::TextButton loadIniButton_{"Import .ini"};
     juce::TextButton saveIniButton_{"Export .ini"};

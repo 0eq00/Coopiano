@@ -26,7 +26,8 @@ namespace coopiano
             const params::EngineConfig& config,
             double hostSampleRate,
             int maxHostBlockSize,
-            const std::atomic<bool>* cancelFlag = nullptr)
+            const std::atomic<bool>* cancelFlag = nullptr,
+            bool editMode = false)
         {
             if (cancelFlag && cancelFlag->load(std::memory_order_relaxed))
                 return nullptr;
@@ -36,7 +37,7 @@ namespace coopiano
             if (cancelFlag && cancelFlag->load(std::memory_order_relaxed))
                 return nullptr;
 
-            rt->engine_->build_strike_cache(config.velocityGamma, cancelFlag);
+            rt->engine_->build_strike_cache(config.velocityGamma, cancelFlag, editMode);
 
             if (cancelFlag && cancelFlag->load(std::memory_order_relaxed))
                 return nullptr;
@@ -276,13 +277,14 @@ namespace coopiano
             retired_.clear();
         }
 
-        void requestBuild(const params::EngineConfig& cfg, double sampleRate, int maxBlockSize, bool immediate = false)
+        void requestBuild(const params::EngineConfig& cfg, double sampleRate, int maxBlockSize, bool immediate = false, bool editMode = false)
         {
             {
                 const juce::ScopedLock sl(lock_);
                 requestedConfig_ = cfg;
                 requestedSampleRate_ = sampleRate;
                 requestedMaxBlock_ = maxBlockSize;
+                requestedEditMode_ = editMode;
                 requestId_.fetch_add(1, std::memory_order_release);
                 hasRequest_ = true;
                 immediateRequest_ = immediateRequest_ || immediate;
@@ -324,6 +326,7 @@ namespace coopiano
                 int block = 512;
                 uint64_t currentId = 0;
                 bool immediate = false;
+                bool editMode = false;
 
                 {
                     const juce::ScopedLock sl(lock_);
@@ -332,6 +335,7 @@ namespace coopiano
                     cfg = requestedConfig_;
                     sr = requestedSampleRate_;
                     block = requestedMaxBlock_;
+                    editMode = requestedEditMode_;
                     currentId = requestId_.load(std::memory_order_acquire);
                     immediate = immediateRequest_;
                     immediateRequest_ = false;
@@ -356,7 +360,7 @@ namespace coopiano
                 std::unique_ptr<EngineRuntime> built;
                 try
                 {
-                    built = EngineRuntime::build(cfg, sr, block, &cancelCurrent_);
+                    built = EngineRuntime::build(cfg, sr, block, &cancelCurrent_, editMode);
                 }
                 catch (...)
                 {
@@ -414,6 +418,7 @@ namespace coopiano
         int requestedMaxBlock_ = 512;
         bool hasRequest_ = false;
         bool immediateRequest_ = false;
+        bool requestedEditMode_ = false;
 
         std::atomic<uint64_t> requestId_{0};
         std::atomic<bool> cancelCurrent_{false};

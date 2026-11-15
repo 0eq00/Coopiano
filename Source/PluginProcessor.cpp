@@ -69,7 +69,7 @@ void CoopianoAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBloc
 
     resetPedalState();
     rebuildReverb();
-    builder_.requestBuild(cfg, currentSampleRate_, currentBlockSize_, true);
+    builder_.requestBuild(cfg, currentSampleRate_, currentBlockSize_, true, isEditMode());
 }
 
 void CoopianoAudioProcessor::releaseResources()
@@ -101,6 +101,18 @@ void CoopianoAudioProcessor::parameterChanged(const juce::String& parameterID, f
     triggerAsyncUpdate();
 }
 
+void CoopianoAudioProcessor::setEditMode(bool editMode)
+{
+    const bool prev = editMode_.exchange(editMode, std::memory_order_acq_rel);
+    if (prev != editMode)
+    {
+        engineRebuildPending_.store(false, std::memory_order_release);
+        immediateRebuildRequested_.store(false, std::memory_order_release);
+        const auto cfg = coopiano::params::readConfig(apvts_);
+        builder_.requestBuild(cfg, currentSampleRate_, currentBlockSize_, true, editMode);
+    }
+}
+
 void CoopianoAudioProcessor::handleAsyncUpdate()
 {
     if (reverbRebuildPending_.exchange(false, std::memory_order_acq_rel))
@@ -108,8 +120,9 @@ void CoopianoAudioProcessor::handleAsyncUpdate()
 
     if (engineRebuildPending_.exchange(false, std::memory_order_acq_rel))
     {
+        const bool immediate = immediateRebuildRequested_.exchange(false, std::memory_order_acq_rel) || !isEditMode();
         const auto cfg = coopiano::params::readConfig(apvts_);
-        builder_.requestBuild(cfg, currentSampleRate_, currentBlockSize_, false);
+        builder_.requestBuild(cfg, currentSampleRate_, currentBlockSize_, immediate, isEditMode());
     }
 }
 
@@ -453,6 +466,7 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
 void CoopianoAudioProcessor::setCurrentProgram(int index)
 {
     currentProgram_ = std::clamp(index, 0, getNumPrograms() - 1);
+    immediateRebuildRequested_.store(true, std::memory_order_release);
     const auto preset = coopiano::params::makeFactoryPreset(currentProgram_);
     coopiano::params::applyPreset(apvts_, preset);
 }
@@ -481,7 +495,10 @@ void CoopianoAudioProcessor::setStateInformation(const void* data, int sizeInByt
 {
     std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
     if (xmlState && xmlState->hasTagName(apvts_.state.getType()))
+    {
+        immediateRebuildRequested_.store(true, std::memory_order_release);
         apvts_.replaceState(juce::ValueTree::fromXml(*xmlState));
+    }
 }
 
 bool CoopianoAudioProcessor::loadPresetFromFile(const juce::File& iniFile, juce::String& errorMessage)
@@ -489,6 +506,7 @@ bool CoopianoAudioProcessor::loadPresetFromFile(const juce::File& iniFile, juce:
     try
     {
         const auto p = preset::load(iniFile.getFullPathName().toStdString());
+        immediateRebuildRequested_.store(true, std::memory_order_release);
         coopiano::params::applyPreset(apvts_, p);
         return true;
     }

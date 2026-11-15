@@ -94,6 +94,15 @@ CoopianoAudioProcessorEditor::CoopianoAudioProcessorEditor(CoopianoAudioProcesso
 {
     setLookAndFeel(&lookAndFeel_);
 
+    modeButton_.setClickingTogglesState(true);
+    modeButton_.setToggleState(processor_.isEditMode(), juce::dontSendNotification);
+    modeButton_.setTooltip("Play Mode: full 88 keys / 127 velocities (instant controls only) | Edit Mode: all controls unlocked, fast rebuild (C2-C5, 8 velocities)");
+    modeButton_.onClick = [this] {
+        processor_.setEditMode(modeButton_.getToggleState());
+        updateModeUi();
+    };
+    addAndMakeVisible(modeButton_);
+
     for (int i = 0; i < processor_.getNumPrograms(); ++i)
         presetCombo_.addItem(processor_.getProgramName(i), i + 1);
     presetCombo_.setSelectedId(processor_.getCurrentProgram() + 1, juce::dontSendNotification);
@@ -214,9 +223,10 @@ CoopianoAudioProcessorEditor::CoopianoAudioProcessorEditor(CoopianoAudioProcesso
     addAndMakeVisible(keyboard_);
 
     selectTab(0);
-    setSize(1020, 560);
+    updateModeUi();
+    setSize(1040, 560);
     setResizable(true, true);
-    setResizeLimits(880, 500, 1440, 820);
+    setResizeLimits(980, 500, 1440, 820);
     startTimerHz(24);
 }
 
@@ -291,10 +301,55 @@ void CoopianoAudioProcessorEditor::selectTab(int tabIndex)
     repaint();
 }
 
+void CoopianoAudioProcessorEditor::updateModeUi()
+{
+    const bool editMode = processor_.isEditMode();
+    modeButton_.setToggleState(editMode, juce::dontSendNotification);
+    modeButton_.setButtonText(editMode ? "Edit Mode" : "Play Mode");
+    modeButton_.setColour(juce::TextButton::textColourOffId, kTextPrimary);
+    modeButton_.setColour(juce::TextButton::textColourOnId, kAccentActive);
+
+    for (auto& knobs : tabKnobs_)
+    {
+        for (auto& k : knobs)
+        {
+            const bool enabled = editMode || coopiano::params::isInstantOnlyParam(k.paramId);
+            k.slider->setEnabled(enabled);
+            k.slider->setAlpha(enabled ? 1.0f : 0.42f);
+            k.label->setAlpha(enabled ? 1.0f : 0.42f);
+        }
+    }
+
+    for (auto& toggles : tabToggles_)
+    {
+        for (auto& t : toggles)
+        {
+            const bool enabled = editMode || coopiano::params::isInstantOnlyParam(t.paramId);
+            t.button->setEnabled(enabled);
+            t.button->setAlpha(enabled ? 1.0f : 0.42f);
+        }
+    }
+
+    if (editMode)
+    {
+        keyboard_.setAvailableRange(36, 72);
+        keyboard_.setLowestVisibleKey(36);
+    }
+    else
+    {
+        keyboard_.setAvailableRange(21, 108);
+    }
+
+    repaint(0, 0, getWidth(), 64);
+}
+
 void CoopianoAudioProcessorEditor::timerCallback()
 {
     meterL_ = std::max(processor_.outputPeakL(), meterL_ * 0.84f);
     meterR_ = std::max(processor_.outputPeakR(), meterR_ * 0.84f);
+
+    if (modeButton_.getToggleState() != processor_.isEditMode())
+        updateModeUi();
 
     if (softPedalButton_.getToggleState() != processor_.isSoftPedalDown())
         softPedalButton_.setToggleState(processor_.isSoftPedalDown(), juce::dontSendNotification);
@@ -320,15 +375,22 @@ void CoopianoAudioProcessorEditor::paint(juce::Graphics& g)
     g.setFont(juce::FontOptions(20.0f, juce::Font::bold));
     g.drawText("COOPIANO", 20, 10, 160, 24, juce::Justification::centredLeft);
 
-    g.setColour(kTextSecondary);
-    g.setFont(juce::FontOptions(11.5f));
-    const juce::String statusText = processor_.isEngineBuilding()
+    const bool building = processor_.isEngineBuilding();
+    const bool editMode = processor_.isEditMode();
+    const juce::String statusText = building
         ? "Preparing Strike Bank..."
-        : (processor_.isEngineReady() ? "Ready" : "Initializing");
-    const juce::String telemetry = statusText
-        + "  |  Voices: " + juce::String(processor_.activeVoices())
+        : (processor_.isEngineReady()
+            ? (editMode ? "Ready (Edit: C2-C5, 8 Vel)" : "Ready")
+            : "Initializing");
+    const juce::String metricsText = "  |  Voices: " + juce::String(processor_.activeVoices())
         + "  |  PDC: " + juce::String(processor_.latencySamplesReported()) + " smp";
-    g.drawText(telemetry, 20, 33, 300, 18, juce::Justification::centredLeft);
+
+    const juce::Font statusFont(juce::FontOptions(11.5f));
+    juce::AttributedString statusLine;
+    statusLine.setJustification(juce::Justification::centredLeft);
+    statusLine.append(statusText, statusFont, building ? juce::Colour(0xffef4444) : kTextSecondary);
+    statusLine.append(metricsText, statusFont, kTextSecondary);
+    statusLine.draw(g, juce::Rectangle<float>(20.0f, 33.0f, 310.0f, 18.0f));
 
     const int meterX = getWidth() - 116;
     g.setColour(kBgSurface);
@@ -355,14 +417,15 @@ void CoopianoAudioProcessorEditor::resized()
     auto bounds = getLocalBounds();
 
     auto header = bounds.removeFromTop(58);
-    auto rightControls = header.removeFromRight(680).reduced(12, 14);
-    rightControls.removeFromRight(114);
-    sustainButton_.setBounds(rightControls.removeFromRight(64).reduced(2, 0));
-    sostenutoButton_.setBounds(rightControls.removeFromRight(54).reduced(2, 0));
-    softPedalButton_.setBounds(rightControls.removeFromRight(52).reduced(2, 0));
-    saveIniButton_.setBounds(rightControls.removeFromRight(84).reduced(2, 0));
-    loadIniButton_.setBounds(rightControls.removeFromRight(84).reduced(2, 0));
-    presetCombo_.setBounds(rightControls.reduced(4, 0));
+    auto rightControls = header.removeFromRight(704).reduced(12, 14);
+    rightControls.removeFromRight(112);
+    sustainButton_.setBounds(rightControls.removeFromRight(58).reduced(2, 0));
+    sostenutoButton_.setBounds(rightControls.removeFromRight(48).reduced(2, 0));
+    softPedalButton_.setBounds(rightControls.removeFromRight(46).reduced(2, 0));
+    saveIniButton_.setBounds(rightControls.removeFromRight(76).reduced(2, 0));
+    loadIniButton_.setBounds(rightControls.removeFromRight(76).reduced(2, 0));
+    presetCombo_.setBounds(rightControls.removeFromRight(178).reduced(4, 0));
+    modeButton_.setBounds(rightControls.reduced(2, 0));
 
     auto kbArea = bounds.removeFromBottom(104).reduced(16, 8);
     keyboard_.setBounds(kbArea);
