@@ -73,11 +73,11 @@ private:
     juce::TextButton sostenutoButton_{"Sost"};
     juce::TextButton sustainButton_{"Sustain"};
 
-    std::array<juce::TextButton, 6> tabButtons_;
+    std::array<juce::TextButton, 7> tabButtons_;
     int activeTab_ = 0;
 
-    std::array<std::vector<KnobControl>, 6> tabKnobs_;
-    std::array<std::vector<ToggleControl>, 6> tabToggles_;
+    std::array<std::vector<KnobControl>, 7> tabKnobs_;
+    std::array<std::vector<ToggleControl>, 7> tabToggles_;
 
     juce::MidiKeyboardComponent keyboard_;
     std::unique_ptr<juce::FileChooser> fileChooser_;

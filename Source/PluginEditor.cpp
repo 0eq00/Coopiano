@@ -139,8 +139,8 @@ CoopianoAudioProcessorEditor::CoopianoAudioProcessorEditor(CoopianoAudioProcesso
     };
     addAndMakeVisible(sustainButton_);
 
-    const std::array<const char*, 6> tabTitles = {
-        "Hammer", "Strings", "Tone", "Soundboard", "Resonance", "Room & Output"
+    const std::array<const char*, 7> tabTitles = {
+        "Hammer", "Strings", "Tone", "Soundboard", "Resonance", "Others", "Room & Output"
     };
     for (size_t i = 0; i < tabButtons_.size(); ++i)
     {
@@ -156,8 +156,7 @@ CoopianoAudioProcessorEditor::CoopianoAudioProcessorEditor(CoopianoAudioProcesso
         { P::hammerMass,      "Mass" },
         { P::hammerFeltWidth, "Felt Width" },
         { P::hammerMaxVel,    "Max Vel (m/s)" },
-        { P::hammerVelExp,    "Vel Exponent" },
-        { P::perfVelGamma,    "MIDI Gamma" }
+        { P::hammerVelExp,    "Vel Exponent" }
     });
 
     populateSection(1, {
@@ -198,16 +197,12 @@ CoopianoAudioProcessorEditor::CoopianoAudioProcessorEditor(CoopianoAudioProcesso
         { P::resMaxDecay,    "Open T60 Cap (s)" },
         { P::resDamperDecay, "Damper T60 (s)" },
         { P::resTransition,  "Transition (s)" },
-        { P::resOwnDrive,    "Own Key Drive" },
-        { P::optDamperScale, "Damper Time" }
+        { P::resOwnDrive,    "Own Key Drive" }
     });
 
     populateSection(5, {
-        { P::revMix,         "Room Mix" },
-        { P::revDecay,       "Room Decay (s)" },
-        { P::revPredelay,    "Predelay (ms)" },
-        { P::revDamping,     "Damping (Hz)" },
-        { P::outGainDb,      "Output Gain (dB)" },
+        { P::perfVelGamma,   "MIDI Gamma" },
+        { P::optDamperScale, "Damper Time" },
         { P::optKnockGain,   "Knock Gain" },
         { P::perfMaxVoices,  "Max Polyphony" }
     }, {
@@ -215,6 +210,14 @@ CoopianoAudioProcessorEditor::CoopianoAudioProcessorEditor(CoopianoAudioProcesso
         { P::optScrape,      "Hammer Scrape" },
         { P::optDamperNoise, "Damper Noise" },
         { P::optSoftLong,    "Soften Long. Highs" }
+    });
+
+    populateSection(6, {
+        { P::revMix,         "Room Mix" },
+        { P::revDecay,       "Room Decay (s)" },
+        { P::revPredelay,    "Predelay (ms)" },
+        { P::revDamping,     "Damping (Hz)" },
+        { P::outGainDb,      "Output Gain (dB)" }
     });
 
     keyboard_.setAvailableRange(21, 108);
@@ -281,7 +284,7 @@ void CoopianoAudioProcessorEditor::populateSection(
 
 void CoopianoAudioProcessorEditor::selectTab(int tabIndex)
 {
-    activeTab_ = juce::jlimit(0, 5, tabIndex);
+    activeTab_ = juce::jlimit(0, 6, tabIndex);
     for (size_t i = 0; i < tabButtons_.size(); ++i)
     {
         const bool active = static_cast<int>(i) == activeTab_;
@@ -376,19 +379,23 @@ void CoopianoAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawText("COOPIANO", 20, 10, 160, 24, juce::Justification::centredLeft);
 
     const bool building = processor_.isEngineBuilding();
+    const bool ready = processor_.isEngineReady();
     const bool editMode = processor_.isEditMode();
     const juce::String statusText = building
         ? "Preparing Strike Bank..."
-        : (processor_.isEngineReady()
+        : (ready
             ? (editMode ? "Ready (Edit: C2-C5, 8 Vel)" : "Ready")
             : "Initializing");
     const juce::String metricsText = "  |  Voices: " + juce::String(processor_.activeVoices())
         + "  |  PDC: " + juce::String(processor_.latencySamplesReported()) + " smp";
 
     const juce::Font statusFont(juce::FontOptions(11.5f));
+    const juce::Colour statusColour = building
+        ? juce::Colour(0xffef4444)
+        : (ready ? juce::Colour(0xff22c55e) : kTextSecondary);
     juce::AttributedString statusLine;
     statusLine.setJustification(juce::Justification::centredLeft);
-    statusLine.append(statusText, statusFont, building ? juce::Colour(0xffef4444) : kTextSecondary);
+    statusLine.append(statusText, statusFont, statusColour);
     statusLine.append(metricsText, statusFont, kTextSecondary);
     statusLine.draw(g, juce::Rectangle<float>(20.0f, 33.0f, 310.0f, 18.0f));
 
