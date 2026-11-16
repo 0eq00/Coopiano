@@ -32,7 +32,7 @@ namespace coopiano
             if (cancelFlag && cancelFlag->load(std::memory_order_relaxed))
                 return nullptr;
 
-            auto rt = std::unique_ptr<EngineRuntime>(new EngineRuntime(config, hostSampleRate, maxHostBlockSize));
+            auto rt = std::unique_ptr<EngineRuntime>(new EngineRuntime(config, hostSampleRate, maxHostBlockSize, editMode));
 
             if (cancelFlag && cancelFlag->load(std::memory_order_relaxed))
                 return nullptr;
@@ -44,6 +44,13 @@ namespace coopiano
 
             rt->adapter_->prepare(rt->adapterRate_, rt->adapterMaxBlock_, kMaxEventsPerBlock);
             return rt;
+        }
+
+        bool matches(const params::EngineConfig& config, double hostSampleRate, bool editMode) const noexcept
+        {
+            return builtEditMode_ == editMode
+                && std::abs(hostRate_ - hostSampleRate) < 0.5
+                && builtConfig_.engineEqual(config);
         }
 
         void reset() noexcept
@@ -188,9 +195,12 @@ namespace coopiano
         }
 
     private:
-        EngineRuntime(const params::EngineConfig& config, double hostSampleRate, int maxHostBlockSize)
+        EngineRuntime(const params::EngineConfig& config, double hostSampleRate, int maxHostBlockSize, bool editMode)
             : hostRate_(hostSampleRate)
+            , builtConfig_(config)
+            , builtEditMode_(editMode)
         {
+            juce::ignoreUnused(maxHostBlockSize);
             instrument::Settings settings;
             settings.voicing = config.preset.voicing;
             settings.voice_options = config.voiceOptions;
@@ -206,9 +216,8 @@ namespace coopiano
             directHostRate_ = piano_host::supported_rate(hostSampleRate);
             adapterRate_ = directHostRate_ ? hostSampleRate : static_cast<double>(piano::FS);
 
-            const size_t requested = static_cast<size_t>(std::max(64, maxHostBlockSize));
             adapterMaxBlock_ = directHostRate_
-                ? std::min(kMaxAdapterBlock, requested)
+                ? kMaxAdapterBlock
                 : std::min(kMaxAdapterBlock, size_t(256));
 
             const double ratio = adapterRate_ / hostRate_;
@@ -245,6 +254,8 @@ namespace coopiano
         bool directHostRate_ = true;
         size_t adapterMaxBlock_ = 1024;
         size_t fallbackHostChunk_ = 64;
+        params::EngineConfig builtConfig_;
+        bool builtEditMode_ = false;
 
         std::unique_ptr<instrument::Engine> engine_;
         std::unique_ptr<piano_host::Adapter> adapter_;
@@ -265,6 +276,7 @@ namespace coopiano
     public:
         EngineBuilderThread() : juce::Thread("CoopianoEngineBuilder")
         {
+            buildDoneEvent_.signal();
             startThread(juce::Thread::Priority::normal);
         }
 
@@ -273,6 +285,7 @@ namespace coopiano
             cancelCurrent_.store(true, std::memory_order_release);
             signalThreadShouldExit();
             notify();
+            buildDoneEvent_.signal();
             stopThread(-1);
             retired_.clear();
         }
@@ -289,8 +302,36 @@ namespace coopiano
                 hasRequest_ = true;
                 immediateRequest_ = immediateRequest_ || immediate;
                 cancelCurrent_.store(true, std::memory_order_release);
+                buildDoneEvent_.reset();
             }
             notify();
+        }
+
+        bool hasMatchingRequest(const params::EngineConfig& cfg, double sampleRate, bool editMode) const
+        {
+            const juce::ScopedLock sl(lock_);
+            return hasRequest_
+                && requestedEditMode_ == editMode
+                && std::abs(requestedSampleRate_ - sampleRate) < 0.5
+                && requestedConfig_.engineEqual(cfg);
+        }
+
+        bool hasPendingRequest() const
+        {
+            const juce::ScopedLock sl(lock_);
+            return hasRequest_ && requestId_.load(std::memory_order_acquire) != lastHandledId_;
+        }
+
+        void waitUntilIdle(int timeoutMs = 30000)
+        {
+            buildDoneEvent_.wait(timeoutMs);
+        }
+
+        void buildSynchronously(const params::EngineConfig& cfg, double sampleRate, int maxBlockSize, bool editMode)
+        {
+            if (!hasMatchingRequest(cfg, sampleRate, editMode))
+                requestBuild(cfg, sampleRate, maxBlockSize, true, editMode);
+            waitUntilIdle();
         }
 
         // Audio thread: wait-free check for a newly prepared runtime.
@@ -311,11 +352,17 @@ namespace coopiano
     private:
         void run() override
         {
-            uint64_t lastHandledId = 0;
-
             while (!threadShouldExit())
             {
-                wait(250);
+                bool shouldSleep = false;
+                {
+                    const juce::ScopedLock sl(lock_);
+                    shouldSleep = !hasRequest_ || requestId_.load(std::memory_order_acquire) == lastHandledId_;
+                    if (shouldSleep)
+                        buildDoneEvent_.signal();
+                }
+                if (shouldSleep)
+                    wait(250);
                 if (threadShouldExit())
                     break;
 
@@ -330,8 +377,11 @@ namespace coopiano
 
                 {
                     const juce::ScopedLock sl(lock_);
-                    if (!hasRequest_ || requestId_.load(std::memory_order_acquire) == lastHandledId)
+                    if (!hasRequest_ || requestId_.load(std::memory_order_acquire) == lastHandledId_)
+                    {
+                        buildDoneEvent_.signal();
                         continue;
+                    }
                     cfg = requestedConfig_;
                     sr = requestedSampleRate_;
                     block = requestedMaxBlock_;
@@ -354,7 +404,11 @@ namespace coopiano
                         continue;
                 }
 
+                if (requestId_.load(std::memory_order_acquire) != currentId)
+                    continue;
                 cancelCurrent_.store(false, std::memory_order_release);
+                if (requestId_.load(std::memory_order_acquire) != currentId)
+                    continue;
                 building_.store(true, std::memory_order_release);
 
                 std::unique_ptr<EngineRuntime> built;
@@ -370,11 +424,13 @@ namespace coopiano
                 building_.store(false, std::memory_order_release);
 
                 if (threadShouldExit())
+                {
+                    buildDoneEvent_.signal();
                     break;
+                }
 
                 if (built && requestId_.load(std::memory_order_acquire) == currentId)
                 {
-                    lastHandledId = currentId;
                     auto* raw = built.get();
 
                     // Stage into owned pool before publishing pointer to audio thread
@@ -388,6 +444,18 @@ namespace coopiano
                             retired_.end());
                     }
                     hasPublished_.store(true, std::memory_order_release);
+
+                    const juce::ScopedLock sl(lock_);
+                    lastHandledId_ = currentId;
+                    if (requestId_.load(std::memory_order_acquire) == lastHandledId_)
+                        buildDoneEvent_.signal();
+                }
+                else if (requestId_.load(std::memory_order_acquire) == currentId)
+                {
+                    const juce::ScopedLock sl(lock_);
+                    lastHandledId_ = currentId;
+                    if (requestId_.load(std::memory_order_acquire) == lastHandledId_)
+                        buildDoneEvent_.signal();
                 }
             }
         }
@@ -419,7 +487,9 @@ namespace coopiano
         bool hasRequest_ = false;
         bool immediateRequest_ = false;
         bool requestedEditMode_ = false;
+        uint64_t lastHandledId_ = 0;
 
+        juce::WaitableEvent buildDoneEvent_{true};
         std::atomic<uint64_t> requestId_{0};
         std::atomic<bool> cancelCurrent_{false};
         std::atomic<bool> building_{false};

@@ -64,12 +64,90 @@ void CoopianoAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBloc
     softAmountSmoothed_.setCurrentAndTargetValue(0.0f);
     softLpCoeff_ = std::exp(-2.0f * juce::MathConstants<float>::pi * 2200.0f / static_cast<float>(currentSampleRate_));
 
-    if (activeRuntime_)
-        activeRuntime_->reset();
-
     resetPedalState();
-    rebuildReverb();
-    builder_.requestBuild(cfg, currentSampleRate_, currentBlockSize_, true, isEditMode());
+
+    activeRuntime_ = builder_.pollForAudioThread(activeRuntime_);
+    if (auto* nextRev = pendingReverb_.exchange(nullptr, std::memory_order_acq_rel))
+    {
+        activeReverb_ = nextRev;
+        lastReverbAdoptedEpoch_.store(audioReverbEpoch_.load(std::memory_order_acquire), std::memory_order_release);
+    }
+
+    const bool needReverbRebuild = reverbRebuildPending_.exchange(false, std::memory_order_acq_rel)
+        || activeReverb_ == nullptr
+        || std::abs(activeReverbRate_ - currentSampleRate_) >= 0.5;
+    if (needReverbRebuild)
+    {
+        rebuildReverb();
+        if (auto* nextRev = pendingReverb_.exchange(nullptr, std::memory_order_acq_rel))
+        {
+            activeReverb_ = nextRev;
+            lastReverbAdoptedEpoch_.store(audioReverbEpoch_.load(std::memory_order_acquire), std::memory_order_release);
+        }
+    }
+    else
+    {
+        activeReverb_->reset();
+    }
+
+    const bool editMode = isEditMode();
+    const bool runtimeUpToDate = activeRuntime_ != nullptr
+        && activeRuntime_->matches(cfg, currentSampleRate_, editMode)
+        && !builder_.hasPendingRequest()
+        && !builder_.isBuilding();
+
+    if (runtimeUpToDate)
+    {
+        engineRebuildPending_.store(false, std::memory_order_release);
+        immediateRebuildRequested_.store(false, std::memory_order_release);
+        activeRuntime_->reset();
+        const int reported = static_cast<int>(activeRuntime_->latencySamples());
+        currentLatency_.store(reported, std::memory_order_relaxed);
+        setLatencySamples(reported);
+    }
+    else if (builder_.hasMatchingRequest(cfg, currentSampleRate_, editMode))
+    {
+        engineRebuildPending_.store(false, std::memory_order_release);
+        immediateRebuildRequested_.store(false, std::memory_order_release);
+        if (activeRuntime_)
+            activeRuntime_->reset();
+        if (isNonRealtime())
+        {
+            builder_.waitUntilIdle();
+            activeRuntime_ = builder_.pollForAudioThread(activeRuntime_);
+            if (activeRuntime_)
+            {
+                activeRuntime_->reset();
+                const int reported = static_cast<int>(activeRuntime_->latencySamples());
+                currentLatency_.store(reported, std::memory_order_relaxed);
+                setLatencySamples(reported);
+            }
+        }
+    }
+    else
+    {
+        engineRebuildPending_.store(false, std::memory_order_release);
+        immediateRebuildRequested_.store(false, std::memory_order_release);
+        if (activeRuntime_)
+            activeRuntime_->reset();
+
+        if (isNonRealtime())
+        {
+            builder_.buildSynchronously(cfg, currentSampleRate_, currentBlockSize_, editMode);
+            activeRuntime_ = builder_.pollForAudioThread(activeRuntime_);
+            if (activeRuntime_)
+            {
+                activeRuntime_->reset();
+                const int reported = static_cast<int>(activeRuntime_->latencySamples());
+                currentLatency_.store(reported, std::memory_order_relaxed);
+                setLatencySamples(reported);
+            }
+        }
+        else
+        {
+            builder_.requestBuild(cfg, currentSampleRate_, currentBlockSize_, true, editMode);
+        }
+    }
 }
 
 void CoopianoAudioProcessor::releaseResources()
@@ -140,6 +218,7 @@ void CoopianoAudioProcessor::rebuildReverb()
 
     const auto cfg = coopiano::params::readConfig(apvts_);
     const double clampedRate = std::clamp(currentSampleRate_, 8000.0, 192000.0);
+    activeReverbRate_ = currentSampleRate_;
 
     auto fresh = std::make_unique<room::StereoReverb>(clampedRate, cfg.preset.reverb);
     auto* raw = fresh.get();
@@ -275,6 +354,26 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         return;
     }
 
+    // During offline rendering, guarantee pending/missing engine or reverb builds finish before processing sample 0
+    if (isNonRealtime())
+    {
+        if (reverbRebuildPending_.exchange(false, std::memory_order_acq_rel))
+            rebuildReverb();
+
+        if (engineRebuildPending_.exchange(false, std::memory_order_acq_rel))
+        {
+            immediateRebuildRequested_.store(false, std::memory_order_release);
+            const auto cfg = coopiano::params::readConfig(apvts_);
+            const bool editMode = isEditMode();
+            if (!activeRuntime_ || !activeRuntime_->matches(cfg, currentSampleRate_, editMode))
+                builder_.buildSynchronously(cfg, currentSampleRate_, currentBlockSize_, editMode);
+        }
+        else if (builder_.isBuilding() || builder_.hasPendingRequest())
+        {
+            builder_.waitUntilIdle();
+        }
+    }
+
     // Mix on-screen / computer keyboard MIDI notes into the host MIDI buffer
     keyboardState_.processNextMidiBuffer(midiMessages, 0, numSamples, true);
 
@@ -286,6 +385,20 @@ void CoopianoAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         resetPedalState();
         if (activeRuntime_)
         {
+            const int reported = static_cast<int>(activeRuntime_->latencySamples());
+            currentLatency_.store(reported, std::memory_order_relaxed);
+            setLatencySamples(reported);
+        }
+    }
+
+    if (isNonRealtime() && !activeRuntime_)
+    {
+        const auto cfg = coopiano::params::readConfig(apvts_);
+        builder_.buildSynchronously(cfg, currentSampleRate_, currentBlockSize_, isEditMode());
+        if (auto* builtNow = builder_.pollForAudioThread(activeRuntime_))
+        {
+            activeRuntime_ = builtNow;
+            resetPedalState();
             const int reported = static_cast<int>(activeRuntime_->latencySamples());
             currentLatency_.store(reported, std::memory_order_relaxed);
             setLatencySamples(reported);

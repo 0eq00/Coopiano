@@ -98,6 +98,7 @@ private:
 
     // Host-rate StereoReverb with wait-free replacement (owned by retiredReverbs_)
     room::StereoReverb* activeReverb_ = nullptr;
+    double activeReverbRate_ = 0.0;
     std::vector<std::unique_ptr<room::StereoReverb>> retiredReverbs_;
     std::atomic<room::StereoReverb*> pendingReverb_{nullptr};
     std::atomic<uint64_t> audioReverbEpoch_{0};
