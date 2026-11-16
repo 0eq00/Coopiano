@@ -3,7 +3,7 @@
 This is a JUCE plugin port of [peterc/coopiano](https://github.com/peterc/coopiano), a C++17 physical modeling piano synthesizer.  
 The JUCE wrapper and plugin code were generated using Google AI Studio.
 
-https://github.com/user-attachments/assets/01d2e6c4-9254-4b4b-8295-743dd5a98421
+https://github.com/user-attachments/assets/7205f4a3-cd6e-43ea-9e62-df2f1f046ac5
 
 ## Build
 
