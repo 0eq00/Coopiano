@@ -21,11 +21,11 @@ if(COOP_JUCE_DIR AND EXISTS "${COOP_JUCE_DIR}/CMakeLists.txt")
     add_subdirectory("${COOP_JUCE_DIR}" JUCE)
 else()
     include(FetchContent)
-    message(STATUS "Fetching JUCE 8.0.4 via FetchContent...")
+    message(STATUS "Fetching JUCE 9.0.6 via FetchContent...")
     FetchContent_Declare(
         JUCE
         GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-        GIT_TAG        8.0.4
+        GIT_TAG        9.0.6
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(JUCE)
@@ -66,7 +66,9 @@ target_compile_definitions(CoopianoPlugin
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_MIDI_EFFECT=0
+        JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_DISPLAY_SPLASH_SCREEN=0
+        JUCE_ASIO=1
 )
 
 target_link_libraries(CoopianoPlugin
